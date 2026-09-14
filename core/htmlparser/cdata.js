@@ -7,6 +7,14 @@
 
 ( function() {
 
+	// Detects whether a CDATA value contains a raw HTML opening tag.
+	// Legitimate CDATA content (CSS in <style>, JS in <script>) does not
+	// contain "<" immediately followed by a letter; such a pattern indicates
+	// injected markup attempting to bypass ACF.
+	function containsHtmlTag( value ) {
+		return /<[a-zA-Z]/.test( value );
+	}
+
 	/**
 	 * A lightweight representation of HTML CDATA.
 	 *
@@ -37,34 +45,49 @@
 		filter: function( filter ) {
 			var style = this.getAscendant( 'style' );
 
-			if ( !style ) {
-				return;
+			if ( style ) {
+				// MathML and SVG namespaces processing parsers `style` content as a normal HTML, not text.
+				// Make sure to filter such content also.
+				var nonHtmlElementNamespace = style.getAscendant( { math: 1, svg: 1 } );
+
+				if ( nonHtmlElementNamespace ) {
+					var fragment = CKEDITOR.htmlParser.fragment.fromHtml( this.value ),
+						writer = new CKEDITOR.htmlParser.basicWriter();
+
+					filter.applyTo( fragment );
+					fragment.writeHtml( writer );
+
+					this.value = writer.getHtml();
+				}
 			}
 
-			// MathML and SVG namespaces processing parsers `style` content as a normal HTML, not text.
-			// Make sure to filter such content also.
-			var nonHtmlElementNamespace = style.getAscendant( { math: 1, svg: 1 } );
-
-			if ( !nonHtmlElementNamespace ) {
-				return;
+			// Security fix (CVE CDATA/ACF bypass): CDATA content (inside
+			// <style>/<script>) is normally raw CSS/JS and must NOT contain
+			// HTML tags. If it does, an attacker injected malicious markup
+			// (e.g. <img onerror>) to bypass ACF. HTML-encode it so it can
+			// never execute when written back to the DOM.
+			if ( containsHtmlTag( this.value ) ) {
+				this.value = CKEDITOR.tools.htmlEncode( this.value );
 			}
-
-			var fragment = CKEDITOR.htmlParser.fragment.fromHtml( this.value ),
-				writer = new CKEDITOR.htmlParser.basicWriter();
-
-			filter.applyTo( fragment );
-			fragment.writeHtml( writer );
-
-			this.value = writer.getHtml();
 		},
 
 		/**
-		 * Writes the CDATA with no special manipulations.
+		 * Writes the CDATA, HTML-encoding it if it contains HTML tags
+		 * (defense-in-depth against CDATA/ACF bypass XSS).
 		 *
 		 * @param {CKEDITOR.htmlParser.basicWriter} writer The writer to which write the HTML.
 		 */
 		writeHtml: function( writer ) {
-			writer.write( this.value );
+			var value = this.value;
+
+			// Defense-in-depth: even if filter() did not run (e.g. ACF skips
+			// NODE_TEXT nodes), ensure CDATA carrying HTML tags is encoded
+			// before being written to the DOM.
+			if ( containsHtmlTag( value ) ) {
+				value = CKEDITOR.tools.htmlEncode( value );
+			}
+
+			writer.write( value );
 		}
 	} );
 } )();
